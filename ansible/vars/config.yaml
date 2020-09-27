@@ -1,0 +1,10 @@
+---
+
+vpn_domain: vpn.example.com
+email: example@gmail.com
+
+users:
+  - name: 'pc'
+    password: 'examplepassword'
+  - name: 'phone'
+    password: 'examplepassword'

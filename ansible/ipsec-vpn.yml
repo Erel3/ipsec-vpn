@@ -1,0 +1,119 @@
+---
+
+- name: install and configure strongswan vpn
+  hosts: all
+  tasks:
+    - include_vars: config.yaml
+
+    - name: update apt-get
+      apt:
+        pkg:
+          - strongswan
+          - certbot
+          - iptables-persistent
+        update_cache: yes
+      become: yes
+
+    - name: install and configure letsencrypt certificate for strongswan
+      block:
+
+        - name: get letsencrypt cert
+          shell: certbot certonly --standalone -d {{ vpn_domain }} -n --agree-tos --email {{ email }}
+          become: yes
+
+        - name: disable apparmor to allow cert symlinks
+          block:
+            - file:
+                src: /etc/apparmor.d/{{ item.file }}
+                dest: /etc/apparmor.d/disable/{{ item.file }}
+                state: link
+              with_items:
+                - { file: 'usr.lib.ipsec.charon' }
+                - { file: 'usr.lib.ipsec.stroke' }
+            - shell: |
+                apparmor_parser -R /etc/apparmor.d/usr.lib.ipsec.charon
+                apparmor_parser -R /etc/apparmor.d/usr.lib.ipsec.stroke
+          become: yes
+
+        - name: create cert symlinks
+          block:
+            - file:
+                src: /etc/ssl/certs
+                dest: /etc/ipsec.d/cacerts/certs
+                state: link
+            - file:
+                src: /etc/letsencrypt/live/{{ vpn_domain }}/{{ item.src }}
+                dest: /etc/ipsec.d/{{ item.dest }}
+                state: link
+              with_items:
+                - { src: 'chain.pem', dest: 'cacerts/ca.pem'}
+                - { src: 'cert.pem', dest: 'certs/certificate.pem'}
+                - { src: 'fullchain.pem', dest: 'certs/fullchain.pem'}
+                - { src: 'privkey.pem', dest: 'private/key.pem'}
+          become: yes
+
+    # TODO: rewrite to iptables module.. it's so hard
+    - name: configure iptables routes
+      shell: |
+        iptables -P INPUT ACCEPT
+        iptables -P OUTPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+        iptables -F
+        iptables -Z
+
+        iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+        iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+        iptables -A INPUT -i lo -j ACCEPT
+        iptables -A INPUT -p tcp --dport  80 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+        iptables -A INPUT -p udp --dport  500 -j ACCEPT
+        iptables -A INPUT -p udp --dport 4500 -j ACCEPT
+
+        iptables -A FORWARD -s 10.1.1.0/24 -d 10.1.1.0/24 -j ACCEPT
+        iptables -A FORWARD --match policy --pol ipsec --dir in  --proto esp -s 10.1.1.0/24 -j ACCEPT
+        iptables -A FORWARD --match policy --pol ipsec --dir out --proto esp -d 10.1.1.0/24 -j ACCEPT
+        iptables -t nat -A POSTROUTING -s 10.1.1.0/24 -o eth0 -m policy --pol ipsec --dir out -j ACCEPT
+        iptables -t nat -A POSTROUTING -s 10.1.1.0/24 -o eth0 -j MASQUERADE
+        iptables -t mangle -A FORWARD --match policy --pol ipsec --dir in -s 10.1.1.0/24 -o eth0 -p tcp -m tcp --tcp-flags SYN,RST SYN -m tcpmss --mss 1361:1536 -j TCPMSS --set-mss 1360
+
+        iptables -A INPUT -j DROP
+        iptables -A FORWARD -j DROP
+      become: yes
+
+    - name: keep iptables config after restart
+      shell: |
+        netfilter-persistent save
+        netfilter-persistent reload
+      become: yes
+
+    - name: configure ip forwarding
+      ansible.posix.sysctl:
+        name: '{{ item.name }}'
+        value: '{{ item.value }}'
+      with_items:
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+        - { name: 'net.ipv4.conf.all.accept_redirects', value: '0' }
+        - { name: 'net.ipv4.conf.all.send_redirects', value: '0' }
+        - { name: 'net.ipv4.ip_no_pmtu_disc', value: '1' }
+      become: yes
+
+    - name: add secrets
+      template:
+        src: ipsec.secrets.j2
+        dest: /etc/ipsec.secrets
+        mode: 0600
+      become: yes
+
+    - name: add config
+      template:
+        src: ipsec.conf.j2
+        dest: /etc/ipsec.conf
+        mode: 0644
+      become: yes
+
+    - name: restart strongswan
+      service:
+        name: strongswan
+        state: restarted
+      become: yes
+      

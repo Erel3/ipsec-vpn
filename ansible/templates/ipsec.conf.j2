@@ -1,0 +1,37 @@
+config setup
+  charondebug="ike 1, knl 1, cfg 1"
+
+conn ipsec-vpn-shared
+  compress=no
+  type=tunnel
+  keyexchange=ikev2
+  fragmentation=yes
+  ike = aes256-aes192-aes128-sha256-sha384-modp2048-modp3072-modp4096-modp8192,aes128gcm16-sha384-x25519!
+  esp = aes256-aes192-aes128-sha256-sha384-modp2048-modp3072-modp4096-modp8192,aes128gcm16-sha256-sha384-x25519!
+  dpdaction=restart
+  dpddelay=30s
+  rekey=no
+  left=%any
+  leftid="CN={{ vpn_domain }}"
+  leftcert=certificate.pem
+  leftsendcert=always
+  leftsubnet=0.0.0.0/0
+  right=%any
+  rightid=%any
+  rightauth=eap-mschapv2
+  rightdns=8.8.8.8,8.8.4.4
+  rightsendcert=never
+
+{% for item in users %}
+conn ipsec-vpn-{{ item.name }}
+  also=ipsec-vpn-shared
+  rightsourceip = 10.1.1.{{ loop.index }}/32
+  eap_identity={{ item.name }}
+  auto=add
+
+{% endfor %}
+conn ipsec-vpn
+  also=ipsec-vpn-shared
+  rightsourceip = 10.1.1.0/24
+  eap_identity=%identity
+  auto=add
